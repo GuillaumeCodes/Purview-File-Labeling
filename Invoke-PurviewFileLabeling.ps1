@@ -1722,6 +1722,57 @@ function Save-RememberedValue {
     catch { Write-Verbose "Could not persist ${Name}: $($_.Exception.Message)" }
 }
 
+function Get-SessionValue {
+    <# .SYNOPSIS Reads a process-only value handed off within the current console session. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    if ($script:IgnoreRemembered) { return '' }
+    try {
+        $value = [Environment]::GetEnvironmentVariable($Name, [EnvironmentVariableTarget]::Process)
+        if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+    }
+    catch { Write-Verbose "Could not read ${Name}: $($_.Exception.Message)" }
+    return ''
+}
+
+function Save-SessionValue {
+    <# .SYNOPSIS Keeps tenant context in this process without persisting it for later runs. #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return }
+    [Environment]::SetEnvironmentVariable($Name, $Value, [EnvironmentVariableTarget]::Process)
+}
+
+function Clear-LegacyTenantContextPreference {
+    <# .SYNOPSIS Removes global site and library defaults persisted by earlier versions. #>
+    [CmdletBinding()]
+    param()
+
+    $handoff = [Environment]::GetEnvironmentVariable('PURVIEW_FILE_LABELING_PROCESS_HANDOFF', [EnvironmentVariableTarget]::Process) -eq '1'
+    [Environment]::SetEnvironmentVariable('PURVIEW_FILE_LABELING_PROCESS_HANDOFF', $null, [EnvironmentVariableTarget]::Process)
+    foreach ($name in 'LABEL_TEST_SITE_TENANT_URL', 'PURVIEW_FILE_LABELING_SITE_URL', 'PURVIEW_FILE_LABELING_LIBRARY') {
+        $targets = [System.Collections.Generic.List[EnvironmentVariableTarget]]::new()
+        $targets.Add([EnvironmentVariableTarget]::User)
+        if ($name -eq 'LABEL_TEST_SITE_TENANT_URL' -or -not $handoff) {
+            $targets.Add([EnvironmentVariableTarget]::Process)
+        }
+        foreach ($target in $targets) {
+            try {
+                $value = [Environment]::GetEnvironmentVariable($name, $target)
+                if ([string]::IsNullOrWhiteSpace($value)) { continue }
+                [Environment]::SetEnvironmentVariable($name, $null, $target)
+                Write-RunLog -Severity INFO -Action 'Scrub tenant context' -Result "Removed legacy $target default $name."
+            }
+            catch { Write-Verbose "Could not clear ${name} from ${target}: $($_.Exception.Message)" }
+        }
+    }
+}
+
 function Get-TenantScopedClientIdName {
     <# .SYNOPSIS Builds the per-tenant variable name, so an application from one tenant is never offered to another. #>
     [CmdletBinding()]
@@ -2630,7 +2681,7 @@ function Read-SharePointTarget {
     while ($true) {
         Write-Host ''
         Write-Host '  Type back at any prompt below to return to the main menu.' -ForegroundColor DarkGray
-        $siteUrl = Read-ValueWithDefault -Prompt 'Site URL (for example https://contoso.sharepoint.com/sites/LabelTest)' -Default (Get-RememberedValue -Name 'PURVIEW_FILE_LABELING_SITE_URL')
+        $siteUrl = Read-ValueWithDefault -Prompt 'Site URL (for example https://contoso.sharepoint.com/sites/LabelTest)' -Default (Get-SessionValue -Name 'PURVIEW_FILE_LABELING_SITE_URL')
         if ($siteUrl -eq 'back') { return $null }
         if ($siteUrl -notmatch '^https://[^/]+\.') {
             Write-RunLog -Severity WARN -Action 'Validate site URL' -Result 'Enter the full site URL, starting with https://, or type back to return to the main menu.'
@@ -2652,7 +2703,7 @@ function Read-SharePointTarget {
         }
         Write-RunLog -Severity INFO -Action 'Resolve tenant' -Result "SharePoint reports tenant $tenantId for $siteUrl."
         # The URL answered a real SharePoint tenant challenge, so it is worth proposing again even if sign-in later fails.
-        Save-RememberedValue -Name 'PURVIEW_FILE_LABELING_SITE_URL' -Value $siteUrl
+        Save-SessionValue -Name 'PURVIEW_FILE_LABELING_SITE_URL' -Value $siteUrl
 
         # Sign-in retries stay on this site, so a failed attempt never re-asks for the URL.
         $connected = $false
@@ -2723,14 +2774,14 @@ function Read-SharePointTarget {
             $library = $libraries[$index]
             $libraryOptions[[string]($index + 1)] = '{0}  ({1} items, /{2})' -f $library.Title, $library.ItemCount, $library.SiteRelativeUrl
         }
-        $rememberedLibrary = Get-RememberedValue -Name 'PURVIEW_FILE_LABELING_LIBRARY'
+        $rememberedLibrary = Get-SessionValue -Name 'PURVIEW_FILE_LABELING_LIBRARY'
         $libraryDefault = '1'
         for ($index = 0; $index -lt $libraries.Count; $index++) {
             if ($libraries[$index].Title -eq $rememberedLibrary) { $libraryDefault = [string]($index + 1); break }
         }
         $libraryChoice = Read-MenuChoice -Title 'Choose the document library to scan.' -Options $libraryOptions -Default $libraryDefault
         $selectedLibrary = $libraries[[int]$libraryChoice - 1]
-        Save-RememberedValue -Name 'PURVIEW_FILE_LABELING_LIBRARY' -Value $selectedLibrary.Title
+        Save-SessionValue -Name 'PURVIEW_FILE_LABELING_LIBRARY' -Value $selectedLibrary.Title
 
         $subfolder = ''
         if (-not $SkipSubfolder) {
@@ -5546,13 +5597,13 @@ function Invoke-MeteredSetup {
 
     Write-Host ''
     Write-Host '  The tenant is read from SharePoint itself, so no GUID has to be typed.' -ForegroundColor Gray
-    $siteUrl = Read-ValueWithDefault -Prompt 'Any site URL in the tenant (for example https://contoso.sharepoint.com/sites/LabelTest)' -Default (Get-RememberedValue -Name 'PURVIEW_FILE_LABELING_SITE_URL')
+    $siteUrl = Read-ValueWithDefault -Prompt 'Any site URL in the tenant (for example https://contoso.sharepoint.com/sites/LabelTest)' -Default (Get-SessionValue -Name 'PURVIEW_FILE_LABELING_SITE_URL')
     if ($siteUrl -notmatch '^https://[^/]+\.') {
         Write-RunLog -Severity WARN -Action 'Validate site URL' -Result 'Enter the full site URL, starting with https://.'
         return 'Main'
     }
     $siteUrl = $siteUrl.TrimEnd('/')
-    Save-RememberedValue -Name 'PURVIEW_FILE_LABELING_SITE_URL' -Value $siteUrl
+    Save-SessionValue -Name 'PURVIEW_FILE_LABELING_SITE_URL' -Value $siteUrl
     $tenantId = Get-SharePointTenantId -SiteUrl $siteUrl
     if ([string]::IsNullOrWhiteSpace($tenantId)) {
         $reason = if ($script:LastSharePointTenantLookupStatus -eq 'SiteNotFound') {
@@ -6537,6 +6588,7 @@ Test-DependencyDrift
 # A killed process cannot execute finally, so recover its temporary workers and certificate exports
 # before this run prompts, signs in, or makes a network request.
 Clear-LabelingTemporaryArtifact
+Clear-LegacyTenantContextPreference
 $exitRequested = $false
 try {
     # Asked once, before the menu, so an unreachable source costs no sign-in and the question is not repeated for every run.

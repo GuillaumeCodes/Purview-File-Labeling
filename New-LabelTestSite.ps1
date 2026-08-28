@@ -1374,34 +1374,31 @@ function Clear-TenantPnPClientId {
     }
 }
 
-function Get-ConfiguredTenantRootUrl {
-    <# .SYNOPSIS Reads a remembered SharePoint root URL so repeat runs need no typed input. #>
+function Clear-LegacyTenantContextPreference {
+    <# .SYNOPSIS Removes cross-tenant defaults persisted by earlier versions of either script. #>
     [CmdletBinding()]
     param()
 
-    foreach ($target in [EnvironmentVariableTarget]::Process, [EnvironmentVariableTarget]::User) {
-        try {
-            $value = [Environment]::GetEnvironmentVariable('LABEL_TEST_SITE_TENANT_URL', $target)
-            if (-not [string]::IsNullOrWhiteSpace($value)) { return $value.Trim() }
+    $removed = [System.Collections.Generic.List[string]]::new()
+    foreach ($name in 'LABEL_TEST_SITE_TENANT_URL', 'PURVIEW_FILE_LABELING_SITE_URL', 'PURVIEW_FILE_LABELING_LIBRARY') {
+        $targets = if ($name -eq 'LABEL_TEST_SITE_TENANT_URL') {
+            @([EnvironmentVariableTarget]::Process, [EnvironmentVariableTarget]::User)
         }
-        catch { Write-Verbose "Could not read LABEL_TEST_SITE_TENANT_URL: $($_.Exception.Message)" }
+        else {
+            @([EnvironmentVariableTarget]::User)
+        }
+        foreach ($target in $targets) {
+            try {
+                $value = [Environment]::GetEnvironmentVariable($name, $target)
+                if ([string]::IsNullOrWhiteSpace($value)) { continue }
+                [Environment]::SetEnvironmentVariable($name, $null, $target)
+                $removed.Add("$name ($target)")
+            }
+            catch { Write-Verbose "Could not clear ${name} from ${target}: $($_.Exception.Message)" }
+        }
     }
-    return ''
-}
-
-function Save-TenantRootUrlPreference {
-    <# .SYNOPSIS Remembers a validated SharePoint root URL for later runs. #>
-    [CmdletBinding()]
-    param([Parameter(Mandatory)][string]$RootUrl)
-
-    if ((Get-ConfiguredTenantRootUrl) -eq $RootUrl) { return }
-    [Environment]::SetEnvironmentVariable('LABEL_TEST_SITE_TENANT_URL', $RootUrl, [EnvironmentVariableTarget]::Process)
-    try {
-        [Environment]::SetEnvironmentVariable('LABEL_TEST_SITE_TENANT_URL', $RootUrl, [EnvironmentVariableTarget]::User)
-        Write-Step -Message "Saved $RootUrl in LABEL_TEST_SITE_TENANT_URL so later runs need no input."
-    }
-    catch {
-        Write-Step -Severity Warn -Message "Could not persist LABEL_TEST_SITE_TENANT_URL: $($_.Exception.Message)"
+    if ($removed.Count -gt 0) {
+        Write-Step -Message "Removed persisted cross-tenant defaults: $($removed -join ', ')."
     }
 }
 
@@ -1547,38 +1544,6 @@ function ConvertTo-TenantHint {
     $candidate = $candidate -replace '^https?://', ''
     if ($candidate.Contains('/')) { $candidate = $candidate.Split('/')[0] }
     return ConvertTo-TenantDomainFromHost -HostName $candidate
-}
-
-function Get-DetectedSharePointContext {
-    <# .SYNOPSIS Reads reusable tenant information from an existing PnP connection when one is available. #>
-    [CmdletBinding()]
-    param()
-
-    $result = [pscustomobject]@{
-        RootUrl = ''
-        AdminUrl = ''
-        TenantHint = ''
-        TenantDomain = ''
-        TenantId = ''
-    }
-
-    try {
-        $connection = Get-PnPConnection -ErrorAction Stop
-        if ($null -ne $connection -and -not [string]::IsNullOrWhiteSpace([string]$connection.Url)) {
-            $resolvedUrls = Resolve-SharePointRootUrl -Url ([string]$connection.Url)
-            $result.RootUrl = $resolvedUrls.RootUrl
-            $result.AdminUrl = $resolvedUrls.AdminUrl
-            $result.TenantHint = Get-TenantHintFromUrl -Url $result.RootUrl
-            $result.TenantDomain = $result.TenantHint
-            $tenantProperty = $connection.PSObject.Properties['Tenant']
-            if ($tenantProperty) { $result.TenantId = ConvertTo-GuidString -Value $tenantProperty.Value }
-        }
-    }
-    catch {
-        Write-Verbose "No reusable PnP connection was available: $($_.Exception.Message)"
-    }
-
-    return $result
 }
 
 function Disconnect-PnPCurrentSession {
@@ -1928,7 +1893,7 @@ function Read-SignInRecovery {
 }
 
 function Save-LabelingHandoff {
-    <# .SYNOPSIS Remembers the created site and library so the labeling utility can propose them without typing. #>
+    <# .SYNOPSIS Hands the created site and library to a labeling utility launched by this process. #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)][string]$SiteUrl,
@@ -1948,14 +1913,13 @@ function Save-LabelingHandoff {
     }
     foreach ($name in $values.Keys) {
         [Environment]::SetEnvironmentVariable($name, $values[$name], [EnvironmentVariableTarget]::Process)
-        try { [Environment]::SetEnvironmentVariable($name, $values[$name], [EnvironmentVariableTarget]::User) }
-        catch { Write-Step -Severity Warn -Message "Could not persist ${name}: $($_.Exception.Message)" }
     }
+    [Environment]::SetEnvironmentVariable('PURVIEW_FILE_LABELING_PROCESS_HANDOFF', '1', [EnvironmentVariableTarget]::Process)
     if ($values.Count -gt 2) {
-        Write-Step -Message 'Remembered this site, library, and application, so Invoke-PurviewFileLabeling.ps1 can reuse the same sign-in instead of registering its own.'
+        Write-Step -Message 'Prepared a process-only handoff of this site, library, and application if Invoke-PurviewFileLabeling.ps1 starts now.'
     }
     else {
-        Write-Step -Message 'Remembered this site and library, so Invoke-PurviewFileLabeling.ps1 offers them as defaults.'
+        Write-Step -Message 'Prepared a process-only handoff of this site and library if Invoke-PurviewFileLabeling.ps1 starts now.'
     }
 }
 
@@ -2108,32 +2072,14 @@ else {
 }
 $null = Start-RunLog -Folder $resolvedLogFolder
 Add-LogEntry -Message "Host: PowerShell $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition)); user: $env:USERNAME; machine: $env:COMPUTERNAME"
+Clear-LegacyTenantContextPreference
 
 try {
     if (-not (Test-PnPPrerequisite)) { throw 'PnP.PowerShell prerequisite validation failed.' }
 
     Write-Host ''
-    $detectedContext = Get-DetectedSharePointContext
-    $detectedRootUrl = if (-not [string]::IsNullOrWhiteSpace($detectedContext.RootUrl)) {
-        $detectedContext.RootUrl
-    }
-    else {
-        Get-ConfiguredTenantRootUrl
-    }
-
     $candidateInput = if (-not [string]::IsNullOrWhiteSpace($TenantRootUrl)) {
         $TenantRootUrl
-    }
-    elseif (-not [string]::IsNullOrWhiteSpace($detectedRootUrl)) {
-        # A remembered tenant must not trap the operator in it, so it is only ever a default.
-        if ($AcceptDefaults -or -not (Test-InteractiveHost)) {
-            Write-Step -Message "Using the remembered SharePoint root URL $detectedRootUrl."
-            $detectedRootUrl
-        }
-        else {
-            Write-Step -Message 'Press Enter to reuse the tenant below, or type a different one.'
-            Read-RequiredValue -Prompt 'SharePoint URL, tenant domain, or alias' -Default $detectedRootUrl
-        }
     }
     else {
         ''
@@ -2143,7 +2089,7 @@ try {
     while ($null -eq $resolvedUrls) {
         if ([string]::IsNullOrWhiteSpace($candidateInput)) {
             if (-not (Test-InteractiveHost)) {
-                throw 'The SharePoint tenant is unknown and this host cannot prompt. Pass -TenantRootUrl or set the LABEL_TEST_SITE_TENANT_URL environment variable.'
+                throw 'The SharePoint tenant is unknown and this host cannot prompt. Pass -TenantRootUrl explicitly.'
             }
             Write-Step -Message 'Enter the tenant once. Everything else is resolved and verified automatically.'
             $candidateInput = Read-RequiredValue -Prompt 'SharePoint URL, tenant domain, or alias (for example contoso.sharepoint.com, contoso.onmicrosoft.com, or contoso)'
@@ -2221,8 +2167,6 @@ try {
             }
         }
     }
-    Save-TenantRootUrlPreference -RootUrl $tenantRootUrl
-
     if ($PreflightOnly) {
         Write-Host ''
         Write-Host '  Preflight complete' -ForegroundColor Cyan
@@ -2459,8 +2403,8 @@ finally {
 # Started here, not inside the try block, so the Entra cleanup above has already finished.
 if (-not [string]::IsNullOrWhiteSpace($script:LaunchLabelingPath)) {
     Write-Banner -Title 'Starting Invoke-PurviewFileLabeling.ps1 against the new library' -Body @(
-        'The site and library are already remembered, so press Enter at',
-        'those prompts to accept them.'
+        'The site and library are available to this child run only, so press',
+        'Enter at those prompts to accept them.'
     )
     Write-Host ''
     # The source is already known, so it is carried over rather than asked again.

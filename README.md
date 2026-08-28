@@ -229,7 +229,7 @@ Classification is not immediate. Allow the service time to crawl the new library
 
 ### Handing straight over to the labeling utility
 
-When provisioning finishes, the helper remembers the site URL and library name it just created in `PURVIEW_FILE_LABELING_SITE_URL` and `PURVIEW_FILE_LABELING_LIBRARY`, so `Invoke-PurviewFileLabeling.ps1` proposes both as defaults: press Enter at the site prompt, and the new library is already the highlighted choice in the library menu.
+When provisioning finishes, the helper places the site URL and library name in process-scoped `PURVIEW_FILE_LABELING_SITE_URL` and `PURVIEW_FILE_LABELING_LIBRARY` values. If it starts `Invoke-PurviewFileLabeling.ps1` immediately, that child run proposes both as defaults. They are not saved to the user environment and disappear with the console process.
 
 If `Invoke-PurviewFileLabeling.ps1` sits in the same folder, the helper also offers to start it. That launch is deliberately deferred until **after** helper cleanup finishes, so a generated application is removed before the next sign-in unless `-KeepApp` was used. Supplied applications are never removed. Answer no, or pass `-AcceptDefaults`, and nothing is started.
 
@@ -240,9 +240,9 @@ Both scripts support multiple tenants and prevent a tenant-specific application 
 - The tenant is resolved from the SharePoint address itself, before any sign-in, and passed explicitly to the sign-in. Without that, MSAL reuses whichever account was cached last, which produces a confusing "user account does not exist in this tenant" error when you switch.
 - Application IDs are remembered under a per-tenant name, so an application registered in one tenant is never proposed for another. A value found in a tenant-agnostic variable such as `AZURE_CLIENT_ID` is still offered, but labeled as possibly belonging to another tenant, and registering a fresh one becomes the default.
 - The confidential client records the tenant it was registered in and is skipped, with an explanation, against any other tenant.
-- `New-LabelTestSite.ps1` proposes its remembered root URL as an editable default rather than using it silently, so switching tenants is just typing a different address. `-TenantRootUrl` still overrides it outright.
+- `New-LabelTestSite.ps1` requires the tenant on every standalone run, either interactively or through `-TenantRootUrl`. It never proposes a tenant from an earlier run or an existing PnP session.
 
-Nothing tenant-specific is stored in the repository itself; remembered values live in process- or user-scoped environment variables. Main-menu option 5 discovers and clears every value owned by either script, including tenant-scoped application IDs and the global site and library defaults. To perform the same all-tenant cleanup manually:
+Nothing tenant-specific is stored in the repository itself. Site URLs and library names are process-only; tenant-scoped application IDs and the confidential-client configuration remain user-scoped so reusable applications are not abandoned or offered across tenants. Main-menu option 5 discovers and clears every value owned by either script. Both scripts also remove legacy user-scoped tenant, site, and library defaults created by earlier versions. To perform the same all-tenant cleanup manually:
 
 ```powershell
 foreach ($target in [EnvironmentVariableTarget]::Process, [EnvironmentVariableTarget]::User) {
@@ -254,7 +254,7 @@ foreach ($target in [EnvironmentVariableTarget]::Process, [EnvironmentVariableTa
 
 ### Helper behavior and authentication
 
-The helper focuses on validation, not production labeling. It creates a disposable SharePoint site and library so that the label experience can be tested without affecting live content. It is designed to run with as little input as possible: the tenant, admin URL, cloud, and application are discovered automatically, and the validated root URL is remembered in `LABEL_TEST_SITE_TENANT_URL` so later runs need no typed input.
+The helper focuses on validation, not production labeling. It creates a disposable SharePoint site and library so that the label experience can be tested without affecting live content. The supplied tenant is validated and its admin URL, cloud, and tenant ID are discovered automatically, but the tenant URL is not persisted or inferred from a previous connection.
 
 Every prompt with a sensible default proposes it in brackets, and values can be supplied up front with `-LogFolder`, `-SiteName`, `-LibraryName`, `-TopLevelFolders`, `-FolderDepth`, `-SubfoldersPerFolder`, `-FilesPerFolder`, and `-SensitiveFilesPerFolder`. Pass `-AcceptDefaults` to take every proposed value without being asked.
 
@@ -263,7 +263,7 @@ The helper writes every action to a timestamped `New-LabelTestSite-*.log` in the
 The normal interactive path can ask for these script settings; installation, authentication, and recovery can add their own prompts:
 
 - The log folder, skipped with `-LogFolder` or `-AcceptDefaults`.
-- The SharePoint root URL. `-TenantRootUrl` supplies it outright; a detected or remembered value is an editable default in an interactive run and is accepted automatically with `-AcceptDefaults`. The value can be a full SharePoint URL, an admin or OneDrive host, a `<tenant>.onmicrosoft.com` domain, or just the tenant alias; the scheme is optional.
+- The SharePoint root URL. `-TenantRootUrl` supplies it outright; otherwise every standalone run asks for it. The value can be a full SharePoint URL, an admin or OneDrive host, a `<tenant>.onmicrosoft.com` domain, or just the tenant alias; the scheme is optional.
 - The application-registration decision, skipped when a usable application is found or when `-RegisterApp` or `-ClientId` supplies the decision.
 - The site name and document library name. `-SiteName` and `-LibraryName` set their proposed values; `-AcceptDefaults` accepts them without prompting.
 - How much test content to create: top-level folders, folder levels, subfolders per folder, files per folder, and how many of those files carry fabricated sensitive data. `-TopLevelFolders`, `-FolderDepth`, `-SubfoldersPerFolder`, `-FilesPerFolder`, and `-SensitiveFilesPerFolder` set their proposed values; the two file settings accept a number or a range such as `1-4`; `-AcceptDefaults` accepts them without prompting.
@@ -380,7 +380,7 @@ No positional parameters are required. **Where the files are is asked once, befo
 - Dry run or apply mode.
 - Log and CSV report folder, defaulting to the script directory.
 
-Every prompt that has a sensible default proposes it in brackets, so pressing Enter accepts it. You never have to know a library's internal URL: the utility signs in first and lists the libraries for you. A site URL that signs in successfully is remembered and proposed the next time any site is asked for, including by the confidential client setup, and typing a different one replaces it.
+Every prompt that has a sensible default proposes it in brackets, so pressing Enter accepts it. You never have to know a library's internal URL: the utility signs in first and lists the libraries for you. A site URL that signs in successfully is reused only within the current process, including by confidential-client setup later in the same session. A later standalone run asks again, preventing a previous tenant from appearing as the default.
 
 This is an interactive utility, so it is meant to be run in a console. If its input is redirected and runs out, it stops with a clear message instead of driving every menu at its default.
 
