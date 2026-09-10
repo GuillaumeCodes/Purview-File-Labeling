@@ -149,7 +149,7 @@ Unlike the provisioning helper, this application is kept, because it is what you
 ## Prerequisites
 
 - Windows with Windows PowerShell 5.1 (`powershell.exe`) and .NET Framework 4.7.2 or later. PowerShell 7 (`pwsh`) also works; because the Purview client ships .NET Framework assemblies, the utility falls back to `Import-Module -UseWindowsPowerShell` when a native import fails. Use Windows PowerShell 5.1 if the module misbehaves. The SharePoint Online source needs PowerShell 7.2 or later.
-- The Microsoft Purview Information Protection client and `PurviewInformationProtection` PowerShell module installed for the local and UNC source. The utility cannot install this client automatically because it is distributed as a client installer rather than a PowerShell Gallery module.
+- The Microsoft Purview Information Protection client and `PurviewInformationProtection` PowerShell module for the local and UNC source. When they are missing and `winget` is available, the utility offers to install the client; otherwise it links to Microsoft's installer.
 - `PnP.PowerShell`, for the SharePoint Online source.
 - The `ExchangeOnlineManagement` module, used to connect to Security & Compliance PowerShell and retrieve labels with `Get-Label`.
 - Only to apply labels in SharePoint: preferably the **Azure CLI**, which reuses one sign-in for consent, ownership, and billing. `Microsoft.Graph.Authentication` is needed only when its separate consent fallback is explicitly selected, and **`Az.Resources`** remains the billing fallback when Azure CLI is unavailable. None of them is needed to survey. That step also needs an Azure subscription in the same tenant, effective Contributor or Owner rights on it, direct ownership of the application, and a Global Administrator or Privileged Role Administrator to grant administrator consent.
@@ -424,8 +424,8 @@ Archive/2019,Highly Confidential,true,
 
 Reading those four rows in order: `HR/Policies` and everything beneath it gets `Confidential`, but only Word documents and PDFs are touched. `Public` gets a parented label and is not recursed, so its subfolders are left alone. `Archive/2019` and everything beneath it gets `Highly Confidential` using the extension set you chose at the prompt, because its `Extensions` cell is empty. The last row has an empty `Folder`, which means the root itself, so it labels the loose files sitting directly in the root without descending into any of the folders above.
 
-- `Folder` is relative to the library or root folder you pick after choosing the source. Leave it empty, or use `.`, to mean the root itself. Forward and backward slashes both work.
-- `Label` accepts the display name shown in the label menu, the child name on its own for a parented label such as `Anyone (unrestricted)`, or the label GUID.
+- `Folder` is relative to the library or root folder you pick after choosing the source. Leave it empty, or use `.`, to mean the root itself. Forward and backward slashes both work. Rooted paths, drive-qualified paths, URLs, and parent (`..`) segments are rejected so a CSV row cannot escape the selected root.
+- `Label` accepts the display name shown in the label menu, the label GUID, or a parented label's child name when that child name is unique. If two parents have the same child name, use the full parented name or GUID.
 - `Recurse` is optional and defaults to `true`. It accepts `true`/`false`, `yes`/`no`, or `1`/`0`.
 - `Extensions` is optional and falls back to the extension set you choose before the file is read.
 

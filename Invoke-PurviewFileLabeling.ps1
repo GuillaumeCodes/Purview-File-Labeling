@@ -1041,6 +1041,7 @@ function Connect-SharePointSite {
     $maxAttempts = if ($JustRegistered) { 4 } else { 1 }
     if (Test-ExistingSharePointConnection -SiteUrl $SiteUrl -ClientId $ClientId) {
         $script:SharePointSessionOpened = $true
+        $script:ConnectedAppOnly = $false
         Write-RunLog -Severity SUCCESS -FilePath $SiteUrl -Action 'Connect SharePoint site' -Result "Reusing the sign-in already open for this site, so no browser window is needed."
         return $true
     }
@@ -1112,7 +1113,11 @@ function Disconnect-SharePointSession {
     [CmdletBinding()]
     param()
 
-    if (-not (Get-Command Disconnect-PnPOnline -ErrorAction SilentlyContinue)) { return }
+    if (-not (Get-Command Disconnect-PnPOnline -ErrorAction SilentlyContinue)) {
+        $script:SharePointSessionOpened = $false
+        $script:ConnectedAppOnly = $false
+        return
+    }
     try {
         Disconnect-PnPOnline -ErrorAction Stop
         if ($script:SharePointSessionOpened) {
@@ -1120,7 +1125,10 @@ function Disconnect-SharePointSession {
         }
     }
     catch { Write-Verbose "No active SharePoint session required cleanup: $($_.Exception.Message)" }
-    finally { $script:SharePointSessionOpened = $false }
+    finally {
+        $script:SharePointSessionOpened = $false
+        $script:ConnectedAppOnly = $false
+    }
 }
 
 function Get-SharePointTargetFile {
@@ -3131,9 +3139,25 @@ function Resolve-PlanLabel {
     if ([string]::IsNullOrWhiteSpace($text)) { return $null }
     foreach ($label in $Labels) { if ($label.Id -eq $text) { return $label } }
     foreach ($label in $Labels) { if ($label.Name -eq $text) { return $label } }
-    # A parented label reads "Parent \ Child", so accept the child on its own too.
-    foreach ($label in $Labels) { if (($label.Name -split ' \\ ')[-1] -eq $text) { return $label } }
+    # A parented label reads "Parent \ Child", so accept the child on its own only when
+    # that leaf name identifies exactly one tenant label. Guessing here could apply the
+    # wrong protection when two parents contain a sublabel with the same display name.
+    $leafMatches = @($Labels | Where-Object { ($_.Name -split ' \\ ')[-1] -eq $text })
+    if ($leafMatches.Count -eq 1) { return $leafMatches[0] }
     return $null
+}
+
+function Test-LabelingPlanFolder {
+    <# .SYNOPSIS Rejects a CSV folder that could escape the root selected for the batch run. #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Folder)
+
+    $text = $Folder.Trim()
+    if ([string]::IsNullOrWhiteSpace($text) -or $text -eq '.') { return $true }
+    # Reject UNC/rooted paths, drive-qualified paths (including C:relative), and URI schemes.
+    if ($text -match '^(?:[\\/]|[A-Za-z]:|[A-Za-z][A-Za-z0-9+.-]*:)') { return $false }
+    # Join-Path and SharePoint both resolve parent segments, so even a middle ".." can leave the root.
+    return @($text -split '[\\/]+' | Where-Object { $_ -eq '..' }).Count -eq 0
 }
 
 function Import-LabelingPlan {
@@ -3166,7 +3190,13 @@ function Import-LabelingPlan {
             $labelText = [string](Get-ObjectPropertyValue -InputObject $row -Names 'Label')
             $label = Resolve-PlanLabel -Value $labelText -Labels $Labels
             if ($null -eq $label) {
-                Add-RunFailure -FilePath $Path -Action 'Read labeling plan' -Reason "Line ${lineNumber}: label '$labelText' matches no file-capable tenant label, so the row was dropped."
+                Add-RunFailure -FilePath $Path -Action 'Read labeling plan' -Reason "Line ${lineNumber}: label '$labelText' does not uniquely match a file-capable tenant label, so the row was dropped. Use its full parented name or GUID."
+                continue
+            }
+
+            $folderText = ([string](Get-ObjectPropertyValue -InputObject $row -Names 'Folder')).Trim()
+            if (-not (Test-LabelingPlanFolder -Folder $folderText)) {
+                Add-RunFailure -FilePath $Path -Action 'Read labeling plan' -Reason "Line ${lineNumber}: folder '$folderText' is rooted, drive-qualified, a URI, or contains a parent '..' segment, so it could escape the selected batch root and was dropped."
                 continue
             }
 
@@ -3187,7 +3217,7 @@ function Import-LabelingPlan {
             if ($parsed.Count -gt 0) { $extensions = $parsed }
 
             $plan.Add([pscustomobject]@{
-                    Folder = ([string](Get-ObjectPropertyValue -InputObject $row -Names 'Folder')).Trim().Trim('/', '\')
+                    Folder = $folderText.Trim('/', '\')
                     Label = $label
                     Recurse = $recurse
                     Extensions = @($extensions)
@@ -3451,6 +3481,7 @@ function Connect-SharePointAppOnly {
     # A registration is not usable until Entra replicates it, and app-only sign-in fails outright until then.
     if (Test-ExistingSharePointConnection -SiteUrl $SiteUrl -ClientId $Config.ClientId) {
         $script:SharePointSessionOpened = $true
+        $script:ConnectedAppOnly = $true
         Write-RunLog -Severity SUCCESS -FilePath $SiteUrl -Action 'Connect SharePoint site' -Result 'Reusing the app-only sign-in already open for this site.'
         return $true
     }
@@ -3466,6 +3497,10 @@ function Connect-SharePointAppOnly {
             return $true
         }
         catch {
+            # Connect-PnPOnline can succeed before the validation read fails. Do not let that
+            # partial connection advertise a usable app-only session to the rest of the run.
+            $script:SharePointSessionOpened = $false
+            $script:ConnectedAppOnly = $false
             $message = Get-ErrorText -ErrorRecord $_
             $isMissingApplication = $message -match '(?i)AADSTS700016|was not found in the directory|application with identifier'
             if ($attempt -lt 4 -and $isMissingApplication) {
